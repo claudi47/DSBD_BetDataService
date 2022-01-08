@@ -5,7 +5,7 @@ ENV PYTHONUNBUFFERED=1
 WORKDIR /usr/src/app
 
 COPY requirements.txt ./
-RUN apk add build-base && apk add openssl && apk add libffi-dev
+RUN apk add build-base && apk add openssl && apk add libffi-dev && apk add librdkafka-dev
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .

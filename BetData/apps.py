@@ -1,11 +1,28 @@
+import multiprocessing
 import sys
 
+from confluent_kafka import Consumer
 from django.apps import AppConfig
-from kafka import KafkaConsumer
 
 from BetData.transaction_scheduler import init_scheduler
 
-consumer = KafkaConsumer('quickstart', bootstrap_servers='kafka:9092', auto_offset_reset='earliest')
+
+def kafka_consumer():
+    consumer = Consumer({
+        'bootstrap.servers': 'kafka:9092',
+        'group.id': 'LOLconsumer'
+    })
+    consumer.subscribe(['test'])
+    while True:
+        msg = consumer.poll(1.0)
+        if msg is None:
+            continue
+        if msg.error():
+            print(msg.error())
+            continue
+        print(msg.value().decode('utf-8'))
+    consumer.close()
+
 
 class BetdataConfig(AppConfig):
     default_auto_field = 'django.db.models.BigAutoField'
@@ -15,6 +32,4 @@ class BetdataConfig(AppConfig):
     def ready(self):
         if not 'migrate' in sys.argv:
             init_scheduler()
-
-        for msg in consumer:
-            print(msg)
+            multiprocessing.Process(target=kafka_consumer).start()
