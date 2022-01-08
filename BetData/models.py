@@ -3,15 +3,15 @@ from django.db import models
 # In Django, a model defines the structure of DB table
 # models.py is where we define our database models which Django automatically transaltes into database tables
 # Create your models here.
-class User(models.Model):
-    # models is a package, <Type>Field indicates the type of field
-    username = models.CharField(max_length=127)
-    user_identifier = models.CharField(max_length=127, primary_key=True)
-
-    max_research = models.IntegerField(default=-1)
-    ban_period = models.DateTimeField(null=True)
-
-    timestamp = models.DateTimeField(auto_now_add=True)
+# class User(models.Model):
+#     # models is a package, <Type>Field indicates the type of field
+#     username = models.CharField(max_length=127)
+#     user_identifier = models.CharField(max_length=127, primary_key=True)
+#
+#     max_research = models.IntegerField(default=-1)
+#     ban_period = models.DateTimeField(null=True)
+#
+#     timestamp = models.DateTimeField(auto_now_add=True)
 
 
 class Search(models.Model):

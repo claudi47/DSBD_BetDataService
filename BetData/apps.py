@@ -13,15 +13,18 @@ def kafka_consumer():
         'group.id': 'LOLconsumer'
     })
     consumer.subscribe(['test'])
+    timeout = 5.0
     while True:
-        msg = consumer.poll(1.0)
+        msg = consumer.poll(timeout)
         if msg is None:
+            consumer.close()
+            return None
+        if msg.value() != 'ok':
             continue
         if msg.error():
             print(msg.error())
             continue
         print(msg.value().decode('utf-8'))
-    consumer.close()
 
 
 class BetdataConfig(AppConfig):

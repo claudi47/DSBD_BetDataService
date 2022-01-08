@@ -7,9 +7,10 @@ from rest_framework.decorators import api_view
 from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 
-from BetData.serializers import UserSerializer, SearchSerializer, BetDataSerializer
+from BetData.kafka_producer import kafka_producer_user
+from BetData.serializers import SearchSerializer, BetDataSerializer
 from BetData.transaction_scheduler import transaction_scheduler, repeat_deco
-from models import User, BetData, Search
+from models import BetData, Search
 
 
 @repeat_deco(3, reschedule_count=3, always_reschedule=True)
@@ -27,12 +28,13 @@ def bet_data_view(request):
     username = request.data.get('username')
     web_site = request.data.get('web_site')
     try:
+        kafka_producer_user(username, user_identifier)
         # Check if the user exists. If not, create a new one after the data validation!
-        if not User.objects.filter(pk=user_identifier).exists():
-            user = UserSerializer(data={'username': username, 'user_identifier': user_identifier})
-            # 'raise_exception', if set True, raises a Validation Error exception in case of invalid data!
-            if user.is_valid(raise_exception=True):  # verifies if the user is already created
-                user.save()
+        # if not User.objects.filter(pk=user_identifier).exists():
+        #     user = UserSerializer(data={'username': username, 'user_identifier': user_identifier})
+        #     # 'raise_exception', if set True, raises a Validation Error exception in case of invalid data!
+        #     if user.is_valid(raise_exception=True):  # verifies if the user is already created
+        #         user.save()
 
         csv_url = ''
         search = SearchSerializer(data={'csv_url': csv_url, 'user': user_identifier, 'web_site': web_site})
