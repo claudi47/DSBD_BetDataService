@@ -1,4 +1,5 @@
 import datetime
+import threading
 
 import requests
 from apscheduler.jobstores.base import JobLookupError
@@ -7,6 +8,7 @@ from rest_framework.decorators import api_view
 from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 
+from BetData.kafka_consumers import step_one_user_creation_reply
 from BetData.kafka_producers import step_one_user_creation
 from BetData.serializers import SearchSerializer, BetDataSerializer
 from BetData.transaction_scheduler import transaction_scheduler, repeat_deco
@@ -28,15 +30,26 @@ def bet_data_view(request):
     username = request.data.get('username')
     web_site = request.data.get('web_site')
     try:
+        # Step 1
         step_one_tx_id = f'step_one_user_creation_{user_identifier}'
         step_one_user_creation(username, user_identifier, step_one_tx_id)
-        # Check if the user exists. If not, create a new one after the data validation!
-        # if not User.objects.filter(pk=user_identifier).exists():
-        #     user = UserSerializer(data={'username': username, 'user_identifier': user_identifier})
-        #     # 'raise_exception', if set True, raises a Validation Error exception in case of invalid data!
-        #     if user.is_valid(raise_exception=True):  # verifies if the user is already created
-        #         user.save()
+        # Generator that contains internal infos about generator function
+        step_one_user_creation_reply_gen = step_one_user_creation_reply(step_one_tx_id)
+        step_one_user_creation_reply_fut = next(step_one_user_creation_reply_gen) # ends at first yield
+        step_one_consumer = next(step_one_user_creation_reply_gen)
+        threading.Thread(target=next, args=[step_one_user_creation_reply_gen]).start() # the rest of the generator function
+                                                                                       # executed in a thread because the while True
+        try:
+            step_one_message = step_one_user_creation_reply_fut.result(5.0)
+        except TimeoutError:
+            return Response('bad', status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+        # TODO: add response validation from step one value
+        step_one_consumer.commit(step_one_message)
+        step_one_consumer.close()
 
+        # Here there's the real step 2, but with the pattern database per service we have two collection for each
+        # service, so bet Search and BetData are correct in this way
         csv_url = ''
         search = SearchSerializer(data={'csv_url': csv_url, 'user': user_identifier, 'web_site': web_site})
         if search.is_valid(raise_exception=True):
@@ -61,6 +74,8 @@ def bet_data_view(request):
                 if bet_data.is_valid(raise_exception=True):
                     bet_data.save()
 
+            # Step 3
+            step_three_tx_id = f'step_three_user_creation_{user_identifier}'
             response_parsing_module = requests.post("http://stats_settings:8500/parsing", json=bet_data_list)
             if not response_parsing_module.ok:
                 try:
