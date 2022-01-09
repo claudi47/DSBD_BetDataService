@@ -7,7 +7,7 @@ from rest_framework.decorators import api_view
 from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 
-from BetData.kafka_producer import kafka_producer_user
+from BetData.kafka_producers import step_one_user_creation
 from BetData.serializers import SearchSerializer, BetDataSerializer
 from BetData.transaction_scheduler import transaction_scheduler, repeat_deco
 from models import BetData, Search
@@ -28,7 +28,8 @@ def bet_data_view(request):
     username = request.data.get('username')
     web_site = request.data.get('web_site')
     try:
-        kafka_producer_user(username, user_identifier)
+        step_one_tx_id = f'step_one_user_creation_{user_identifier}'
+        step_one_user_creation(username, user_identifier, step_one_tx_id)
         # Check if the user exists. If not, create a new one after the data validation!
         # if not User.objects.filter(pk=user_identifier).exists():
         #     user = UserSerializer(data={'username': username, 'user_identifier': user_identifier})

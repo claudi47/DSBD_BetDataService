@@ -4,6 +4,7 @@ from django.apps import AppConfig
 
 from BetData.transaction_scheduler import init_scheduler
 
+
 class BetdataConfig(AppConfig):
     default_auto_field = 'django.db.models.BigAutoField'
     name = 'BetData'
