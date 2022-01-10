@@ -8,7 +8,7 @@ from rest_framework.decorators import api_view
 from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 
-from BetData.kafka_consumers import step_one_user_creation_reply
+from BetData.kafka_consumers import step_one_user_creation_reply, KafkaBetdataStepOneConsumer
 from BetData.kafka_producers import step_one_user_creation
 from BetData.serializers import SearchSerializer, BetDataSerializer
 from BetData.transaction_scheduler import transaction_scheduler, repeat_deco
@@ -31,22 +31,19 @@ def bet_data_view(request):
     web_site = request.data.get('web_site')
     try:
         # Step 1
+        def step_one_cb(msg):
+            return True
         step_one_tx_id = f'step_one_user_creation_{user_identifier}'
+        step_one_kafka_consumer = KafkaBetdataStepOneConsumer.current_instance()
         step_one_user_creation(username, user_identifier, step_one_tx_id)
-        # Generator that contains internal infos about generator function
-        step_one_user_creation_reply_gen = step_one_user_creation_reply(step_one_tx_id)
-        step_one_user_creation_reply_fut = next(step_one_user_creation_reply_gen) # ends at first yield
-        step_one_consumer = next(step_one_user_creation_reply_gen)
-        threading.Thread(target=next, args=[step_one_user_creation_reply_gen]).start() # the rest of the generator function
-                                                                                       # executed in a thread because the while True
+
+        step_one_reply_fut = step_one_kafka_consumer.fetch(step_one_tx_id, step_one_cb)
+
         try:
-            step_one_message = step_one_user_creation_reply_fut.result(5.0)
+            step_one_reply_res = step_one_reply_fut.result(timeout=5)
         except TimeoutError:
-            return Response('bad', status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
-        # TODO: add response validation from step one value
-        step_one_consumer.commit(step_one_message)
-        step_one_consumer.close()
+            print('Transaction timed out!')
+            return Response('Transaction timed out', status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         # Here there's the real step 2, but with the pattern database per service we have two collection for each
         # service, so bet Search and BetData are correct in this way
