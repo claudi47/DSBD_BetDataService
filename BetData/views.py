@@ -1,5 +1,4 @@
 import datetime
-import threading
 
 import requests
 from apscheduler.jobstores.base import JobLookupError
@@ -8,7 +7,7 @@ from rest_framework.decorators import api_view
 from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 
-from BetData.kafka_consumers import step_one_user_creation_reply, KafkaBetdataStepOneConsumer
+from BetData.kafka_consumers import KafkaBetdataStepOneConsumer
 from BetData.kafka_producers import step_one_user_creation
 from BetData.serializers import SearchSerializer, BetDataSerializer
 from BetData.transaction_scheduler import transaction_scheduler, repeat_deco

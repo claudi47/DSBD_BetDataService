@@ -6,3 +6,7 @@ pymongo[srv]<4.0.0
 pytz
 djongo
 confluent-kafka
+fastapi
+pydantic[dotenv]
+uvicorn[standard]
+motor

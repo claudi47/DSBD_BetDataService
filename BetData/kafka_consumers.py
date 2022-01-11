@@ -92,7 +92,7 @@ class KafkaBetdataStepOneConsumer:
                     if self._kafka_consumer_futs.get(msg.key()) is None:
                         print('An incident has happened')
                         self._consumer.commit(msg)
-                        del self._kafka_consumer_futs[msg.key()]
+                        continue
                     if not self._kafka_consumer_futs[msg.key()].set_running_or_notify_cancel():
                         print(f'Future canceled: key: {msg.key()}')
                         self._consumer.commit(msg)
