@@ -1,12 +1,21 @@
 import motor.motor_asyncio
 
-from app.settings import settings
+import app.settings as config
 
 
 class Mongo:
     def __init__(self):
-        self.client = motor.motor_asyncio.AsyncIOMotorClient(
-            f'mongodb://{settings.db_username}:{settings.db_password}@{settings.db_host}:{settings.db_port}/')
-        self.db = self.client[settings.db_database]
+        self._client = motor.motor_asyncio.AsyncIOMotorClient(
+            f'mongodb://{config.settings.db_username}:{config.settings.db_password}@{config.settings.db_host}:{config.settings.db_port}/')
+        self._db = self.client[config.settings.db_database]
+
+    @property
+    def db(self):
+        return self._db
+
+    @property
+    def client(self):
+        return self._client
+
 
 mongo = Mongo()

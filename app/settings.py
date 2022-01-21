@@ -8,4 +8,5 @@ class Settings(BaseSettings):
     db_port: int
     db_database: str
 
+
 settings = Settings()
