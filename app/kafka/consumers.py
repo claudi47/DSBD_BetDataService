@@ -94,8 +94,6 @@ search_betdata_sync: dict[str, asyncio.Future] = {}
 bet_data_update_sync_lock = threading.Lock()
 bet_data_update_sync: dict[str, asyncio.Future] = {}
 
-rollback_search_bet_lock = threading.Lock()
-
 
 class PartialSearchEntryConsumer(GenericConsumer):
 
@@ -167,19 +165,17 @@ class PartialSearchEntryConsumer(GenericConsumer):
 
                     async def complete_partial_search():
                         if scheduling.transaction_scheduler.get_job(msg.key()) is None:
-                            with rollback_search_bet_lock:
-                                if scheduling.transaction_scheduler.get_job(msg.key()) is None:
-                                    scheduling.transaction_scheduler.add_job(self._rollback_data, 'date',
-                                                                             run_date=datetime.datetime.now(
-                                                                                 pytz.utc) + datetime.timedelta(
-                                                                                 seconds=20),
-                                                                             args=[id_to_insert, msg.key()],
-                                                                             id=msg.key(),
-                                                                             misfire_grace_time=None,
-                                                                             replace_existing=True
-                                                                             )
+                            scheduling.transaction_scheduler.add_job(self._rollback_data, 'date',
+                                                                     run_date=datetime.datetime.now(
+                                                                         pytz.utc) + datetime.timedelta(
+                                                                         seconds=20),
+                                                                     args=[id_to_insert, msg.key()],
+                                                                     id=msg.key(),
+                                                                     misfire_grace_time=None,
+                                                                     replace_existing=True
+                                                                     )
                         scheduling.transaction_scheduler.pause_job(msg.key())
-
+                        await database.mongo.db[SearchDataPartialInDb.collection_name].delete_many({'tx_id': msg.key()})
                         await database.mongo.db[SearchDataPartialInDb.collection_name].insert_one(
                             {**search_entry.dict(by_alias=True), 'tx_id': msg.key()})
                         scheduling.transaction_scheduler.reschedule_job(msg.key(), trigger='date',
@@ -306,7 +302,7 @@ class BetDataApplyConsumer(GenericConsumer):
 
             scheduling.transaction_scheduler.reschedule_job(tx_id, trigger='date',
                                                             run_date=datetime.datetime.now(
-                                                                pytz.utc) + datetime.timedelta(seconds=20))
+                                                                pytz.utc) + datetime.timedelta(seconds=30))
         except:
             logging.exception('')
             scheduling.transaction_scheduler.reschedule_job(tx_id)
@@ -331,7 +327,7 @@ class BetDataApplyConsumer(GenericConsumer):
                     logging.warning(f'Null value for the message: {msg.key()}')
                     self._consumer.commit(msg)
             except Exception as exc:
-                logging.error(exc)
+                logging.exception('')
                 try:
                     scheduling.transaction_scheduler.reschedule_job(job_id=msg.key(), trigger='date')
                     self._consumer.commit(msg)
@@ -386,14 +382,17 @@ class BetDataFinishConsumer(GenericConsumer):
                             if bet_data_update_sync.get(msg.key().decode('utf-8')) is None:
                                 bet_data_update_sync[msg.key().decode('utf-8')] = self._loop.create_future()
                     await bet_data_update_sync[msg.key().decode('utf-8')]
+                    await database.mongo.db[SearchDataPartialInDb.collection_name].update_one({'tx_id': msg.key().decode('utf-8')},
+                                                                                        {'$set': {'csv_url': msg.value().decode('utf-8')}})
                     scheduling.transaction_scheduler.remove_job(msg.key().decode('utf-8'))
 
                 asyncio.run_coroutine_threadsafe(complete_transaction(), loop=self._loop).result(20)
 
+                bet_data_update_sync[msg.key().decode('utf-8')].cancel()
                 del bet_data_update_sync[msg.key().decode('utf-8')]
                 self._consumer.commit(msg)
             except Exception as exc:
-                logging.error(exc)
+                logging.exception('')
                 try:
                     self._consumer.commit(msg)
                     bet_data_update_sync[msg.key().decode('utf-8')].cancel()
