@@ -9,9 +9,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import app.settings as config
 
 job_stores = {
-    'default': MongoDBJobStore(config.settings.db_database,
-                               host=f'mongodb://{config.settings.db_username}:{config.settings.db_password}@'
-                                    f'{config.settings.db_host}/')
+    'default': MongoDBJobStore(config.db_settings.db_database, host=config.db_settings.db_host)
 }
 
 transaction_scheduler: AsyncIOScheduler

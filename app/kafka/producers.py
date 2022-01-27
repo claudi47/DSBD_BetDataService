@@ -6,11 +6,12 @@ from confluent_kafka import SerializingProducer
 from confluent_kafka.schema_registry import SchemaRegistryClient
 from confluent_kafka.schema_registry.json_schema import JSONSerializer
 from confluent_kafka.serialization import StringSerializer
+import app.settings as config
 
 
 class GenericProducer(ABC):
-    bootstrap_servers = 'broker:29092'
-    schema_registry_conf = {'url': 'http://schema-registry:8081'}
+    bootstrap_servers = config.broker_settings.broker
+    schema_registry_conf = {'url': config.broker_settings.schema_registry}
 
     @abstractmethod
     def model_to_dict(self, obj, ctx):

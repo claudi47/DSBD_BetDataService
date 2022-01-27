@@ -1,10 +1,11 @@
 import asyncio
 import datetime
 import logging
-import pytz
 import threading
 import traceback
 from abc import ABC, abstractmethod
+
+import pytz
 from confluent_kafka import DeserializingConsumer, Consumer
 from confluent_kafka.schema_registry.json_schema import JSONDeserializer
 from confluent_kafka.serialization import StringDeserializer
@@ -12,10 +13,11 @@ from confluent_kafka.serialization import StringDeserializer
 import app.db_utils.advanced_scheduler as scheduling
 import app.db_utils.mongo_utils as database
 from app.models import SearchDataPartialInDb, BetDataListUpdateInDb, PyObjectId
+import app.settings as config
 
 
 class GenericConsumer(ABC):
-    bootstrap_servers = 'broker:29092'
+    bootstrap_servers = config.broker_settings.broker
 
     @property
     @abstractmethod
@@ -111,7 +113,7 @@ class PartialSearchEntryConsumer(GenericConsumer):
 
     @property
     def topic(self):
-        return 'search_entry'
+        return 'search-entry'
 
     @property
     def schema(self):
@@ -175,9 +177,11 @@ class PartialSearchEntryConsumer(GenericConsumer):
                                                                      replace_existing=True
                                                                      )
                         scheduling.transaction_scheduler.pause_job(msg.key())
-                        await database.mongo.db[SearchDataPartialInDb.collection_name].delete_many({'tx_id': msg.key()})
-                        await database.mongo.db[SearchDataPartialInDb.collection_name].insert_one(
-                            {**search_entry.dict(by_alias=True), 'tx_id': msg.key()})
+                        existing_search = await database.mongo.db[SearchDataPartialInDb.collection_name].find_one(
+                            {'tx_id': msg.key()})
+                        if existing_search is None:
+                            await database.mongo.db[SearchDataPartialInDb.collection_name].insert_one(
+                                {**search_entry.dict(by_alias=True), 'tx_id': msg.key()})
                         scheduling.transaction_scheduler.reschedule_job(msg.key(), trigger='date',
                                                                         run_date=datetime.datetime.now(
                                                                             pytz.utc) + datetime.timedelta(seconds=20))
@@ -225,7 +229,7 @@ class BetDataApplyConsumer(GenericConsumer):
 
     @property
     def topic(self):
-        return 'bet_data_apply'
+        return 'bet-data-apply'
 
     @property
     def schema(self):
@@ -279,21 +283,28 @@ class BetDataApplyConsumer(GenericConsumer):
 
     async def _update_betdata_list(self, bet_data, tx_id):
         try:
-            if search_betdata_sync.get(tx_id) is None:
-                with search_betdata_sync_lock:
-                    if search_betdata_sync.get(tx_id) is None:
-                        search_betdata_sync[tx_id] = self._loop.create_future()
-            await search_betdata_sync[tx_id]
+            search_doc = await database.mongo.db[SearchDataPartialInDb.collection_name].find_one({'tx_id': tx_id})
+            if search_doc is None:
+                if search_betdata_sync.get(tx_id) is None:
+                    with search_betdata_sync_lock:
+                        if search_betdata_sync.get(tx_id) is None:
+                            search_betdata_sync[tx_id] = self._loop.create_future()
+                await search_betdata_sync[tx_id]
 
             scheduling.transaction_scheduler.pause_job(tx_id)
 
-            search_doc = await database.mongo.db[SearchDataPartialInDb.collection_name].find_one({'tx_id': tx_id})
             search_id = search_doc['_id']
-            await database.mongo.db[BetDataListUpdateInDb.collection_name].insert_many({**data.dict(),
-                                                                                           'search_id': PyObjectId(
-                                                                                               search_id)} for data
-                                                                                       in
-                                                                                       bet_data)
+
+            if search_doc.get('state') != 'updated':
+                await database.mongo.db[BetDataListUpdateInDb.collection_name].delete_many({'search_id': PyObjectId(search_id)})
+
+                await database.mongo.db[BetDataListUpdateInDb.collection_name].insert_many({**data.dict(),
+                                                                                               'search_id': PyObjectId(
+                                                                                                   search_id)} for data
+                                                                                           in
+                                                                                           bet_data)
+            await database.mongo.db[SearchDataPartialInDb.collection_name].update_one({'tx_id': tx_id},
+                                                                                      {'$set': {'state': 'updated'}})
             if bet_data_update_sync.get(tx_id) is None:
                 with bet_data_update_sync_lock:
                     if bet_data_update_sync.get(tx_id) is None:
@@ -360,7 +371,7 @@ class BetDataFinishConsumer(GenericConsumer):
 
     @property
     def topic(self):
-        return 'bet_data_finish'
+        return 'bet-data-finish'
 
     @property
     def schema(self):
@@ -377,13 +388,16 @@ class BetDataFinishConsumer(GenericConsumer):
                     continue
 
                 async def complete_transaction():
-                    if bet_data_update_sync.get(msg.key().decode('utf-8')) is None:
-                        with bet_data_update_sync_lock:
-                            if bet_data_update_sync.get(msg.key().decode('utf-8')) is None:
-                                bet_data_update_sync[msg.key().decode('utf-8')] = self._loop.create_future()
-                    await bet_data_update_sync[msg.key().decode('utf-8')]
-                    await database.mongo.db[SearchDataPartialInDb.collection_name].update_one({'tx_id': msg.key().decode('utf-8')},
-                                                                                        {'$set': {'csv_url': msg.value().decode('utf-8')}})
+                    existing_search_doc = await database.mongo.db[SearchDataPartialInDb.collection_name].find_one({'tx_id': msg.key().decode('utf-8')})
+                    if existing_search_doc.get('state') != 'updated':
+                        if bet_data_update_sync.get(msg.key().decode('utf-8')) is None:
+                            with bet_data_update_sync_lock:
+                                if bet_data_update_sync.get(msg.key().decode('utf-8')) is None:
+                                    bet_data_update_sync[msg.key().decode('utf-8')] = self._loop.create_future()
+                        await bet_data_update_sync[msg.key().decode('utf-8')]
+                    await database.mongo.db[SearchDataPartialInDb.collection_name].update_one(
+                        {'tx_id': msg.key().decode('utf-8')},
+                        {'$set': {'csv_url': msg.value().decode('utf-8')}})
                     scheduling.transaction_scheduler.remove_job(msg.key().decode('utf-8'))
 
                 asyncio.run_coroutine_threadsafe(complete_transaction(), loop=self._loop).result(20)

@@ -44,6 +44,7 @@ class SearchDataPartialInDb(BaseModel):
     id: PyObjectId = Field(default_factory=PyObjectId, alias='_id')
     web_site: str
     user_id: str
+    timestamp: datetime.datetime = Field(default_factory=get_timezoneaware_now)
 
     class Config:
         allow_population_by_field_name = True
