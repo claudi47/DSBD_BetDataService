@@ -12,8 +12,10 @@ from confluent_kafka.serialization import StringDeserializer
 
 import app.db_utils.advanced_scheduler as scheduling
 import app.db_utils.mongo_utils as database
-from app.models import SearchDataPartialInDb, BetDataListUpdateInDb, PyObjectId
 import app.settings as config
+from app.db_utils.advanced_scheduler import async_repeat_deco
+from app.kafka import producers
+from app.models import SearchDataPartialInDb, BetDataListUpdateInDb, PyObjectId
 
 
 class GenericConsumer(ABC):
@@ -101,7 +103,7 @@ class PartialSearchEntryConsumer(GenericConsumer):
 
     @property
     def group_id(self):
-        return 'my_group'
+        return 'my_group_betdata'
 
     @property
     def auto_offset_reset(self):
@@ -148,6 +150,7 @@ class PartialSearchEntryConsumer(GenericConsumer):
     @scheduling.async_repeat_deco(repeat_count=3, reschedule_count=3, always_reschedule=True)
     async def _rollback_data(id, tx_id):
         await database.mongo.db[SearchDataPartialInDb.collection_name].delete_many({'_id': id})
+        await database.mongo.db['deleted_transactions'].insert_one({'tx_id': tx_id})
         await database.mongo.db[BetDataListUpdateInDb.collection_name].delete_many({'search_id': id})
         try:
             del search_betdata_sync[tx_id]
@@ -185,6 +188,7 @@ class PartialSearchEntryConsumer(GenericConsumer):
                         scheduling.transaction_scheduler.reschedule_job(msg.key(), trigger='date',
                                                                         run_date=datetime.datetime.now(
                                                                             pytz.utc) + datetime.timedelta(seconds=20))
+
                     asyncio.run_coroutine_threadsafe(complete_partial_search(), self._loop).result(20)
                     if search_betdata_sync.get(msg.key()) is None:
                         with search_betdata_sync_lock:
@@ -217,7 +221,7 @@ class BetDataApplyConsumer(GenericConsumer):
 
     @property
     def group_id(self):
-        return 'my_group'
+        return 'my_group_betdata'
 
     @property
     def auto_offset_reset(self):
@@ -285,6 +289,9 @@ class BetDataApplyConsumer(GenericConsumer):
         try:
             search_doc = await database.mongo.db[SearchDataPartialInDb.collection_name].find_one({'tx_id': tx_id})
             if search_doc is None:
+                deleted_tx = await database.mongo.db['deleted_transactions'].find_one({'tx_id': tx_id})
+                if deleted_tx is not None:
+                    raise Exception('Transactions has been deleted!')
                 if search_betdata_sync.get(tx_id) is None:
                     with search_betdata_sync_lock:
                         if search_betdata_sync.get(tx_id) is None:
@@ -293,10 +300,12 @@ class BetDataApplyConsumer(GenericConsumer):
 
             scheduling.transaction_scheduler.pause_job(tx_id)
 
+            search_doc = await database.mongo.db[SearchDataPartialInDb.collection_name].find_one({'tx_id': tx_id})
             search_id = search_doc['_id']
 
             if search_doc.get('state') != 'updated':
-                await database.mongo.db[BetDataListUpdateInDb.collection_name].delete_many({'search_id': PyObjectId(search_id)})
+                await database.mongo.db[BetDataListUpdateInDb.collection_name].delete_many(
+                    {'search_id': PyObjectId(search_id)})
 
                 await database.mongo.db[BetDataListUpdateInDb.collection_name].insert_many({**data.dict(),
                                                                                                'search_id': PyObjectId(
@@ -318,8 +327,11 @@ class BetDataApplyConsumer(GenericConsumer):
             logging.exception('')
             scheduling.transaction_scheduler.reschedule_job(tx_id)
         finally:
-            search_betdata_sync[tx_id].cancel()
-            del search_betdata_sync[tx_id]
+            try:
+                search_betdata_sync[tx_id].cancel()
+                del search_betdata_sync[tx_id]
+            except:
+                pass
 
     def _consume_data(self):
         while not self._cancelled:
@@ -359,7 +371,7 @@ class BetDataFinishConsumer(GenericConsumer):
 
     @property
     def group_id(self):
-        return 'my_group'
+        return 'my_group_betdata'
 
     @property
     def auto_offset_reset(self):
@@ -388,8 +400,12 @@ class BetDataFinishConsumer(GenericConsumer):
                     continue
 
                 async def complete_transaction():
-                    existing_search_doc = await database.mongo.db[SearchDataPartialInDb.collection_name].find_one({'tx_id': msg.key().decode('utf-8')})
-                    if existing_search_doc.get('state') != 'updated':
+                    existing_search_doc = await database.mongo.db[SearchDataPartialInDb.collection_name].find_one(
+                        {'tx_id': msg.key().decode('utf-8')})
+                    if existing_search_doc is None or existing_search_doc.get('state') != 'updated':
+                        deleted_tx = await database.mongo.db['deleted_transactions'].find_one({'tx_id': msg.key().decode('utf-8')})
+                        if deleted_tx is not None:
+                            raise Exception('Transactions has been deleted!')
                         if bet_data_update_sync.get(msg.key().decode('utf-8')) is None:
                             with bet_data_update_sync_lock:
                                 if bet_data_update_sync.get(msg.key().decode('utf-8')) is None:
@@ -399,20 +415,27 @@ class BetDataFinishConsumer(GenericConsumer):
                         {'tx_id': msg.key().decode('utf-8')},
                         {'$set': {'csv_url': msg.value().decode('utf-8')}})
                     scheduling.transaction_scheduler.remove_job(msg.key().decode('utf-8'))
+                    await asyncio.wait_for(producers.csv_message_producer.produce(msg.key(), msg.value(), msg.headers()), 20)
 
                 asyncio.run_coroutine_threadsafe(complete_transaction(), loop=self._loop).result(20)
 
-                bet_data_update_sync[msg.key().decode('utf-8')].cancel()
-                del bet_data_update_sync[msg.key().decode('utf-8')]
-                self._consumer.commit(msg)
-            except Exception as exc:
-                logging.exception('')
                 try:
-                    self._consumer.commit(msg)
                     bet_data_update_sync[msg.key().decode('utf-8')].cancel()
                     del bet_data_update_sync[msg.key().decode('utf-8')]
                 except:
                     pass
+                self._consumer.commit(msg)
+            except Exception as exc:
+                try:
+                    scheduling.transaction_scheduler.reschedule_job(job_id=msg.key(), trigger='date')
+                    self._consumer.commit(msg)
+                except:
+                    try:
+                        self._consumer.commit(msg)
+                        search_betdata_sync[msg.key()].cancel()
+                        del search_betdata_sync[msg.key()]
+                    except:
+                        pass
 
                 # break
 
@@ -425,13 +448,28 @@ betdata_finish_consumer: BetDataFinishConsumer
 
 
 def initialize_consumers():
-    global search_entry_consumer, betdata_apply_consumer, betdata_finish_consumer
-    search_entry_consumer = PartialSearchEntryConsumer(loop=asyncio.get_running_loop())
-    betdata_apply_consumer = BetDataApplyConsumer(loop=asyncio.get_running_loop())
-    betdata_finish_consumer = BetDataFinishConsumer(loop=asyncio.get_running_loop(), normal=True)
-    search_entry_consumer.consume_data()
-    betdata_apply_consumer.consume_data()
-    betdata_finish_consumer.consume_data()
+    @async_repeat_deco(3, 3, always_reschedule=True, store='alternative')
+    async def init_partial_search_entry_consumer(_):
+        global search_entry_consumer
+        search_entry_consumer = PartialSearchEntryConsumer(loop=asyncio.get_running_loop())
+        search_entry_consumer.consume_data()
+
+    @async_repeat_deco(3, 3, always_reschedule=True, store='alternative')
+    async def init_betdata_apply_consumer(_):
+        global betdata_apply_consumer
+        betdata_apply_consumer = BetDataApplyConsumer(loop=asyncio.get_running_loop())
+        betdata_apply_consumer.consume_data()
+
+    @async_repeat_deco(3, 3, always_reschedule=True, store='alternative')
+    async def init_betdata_finish_consumer(_):
+        global betdata_finish_consumer
+        betdata_finish_consumer = BetDataFinishConsumer(loop=asyncio.get_running_loop(), normal=True)
+        betdata_finish_consumer.consume_data()
+
+    asyncio.run_coroutine_threadsafe(init_partial_search_entry_consumer('partial_search_entry_consumer'), loop=asyncio.get_running_loop())
+    asyncio.run_coroutine_threadsafe(init_betdata_apply_consumer('betdata_apply_consumer'), loop=asyncio.get_running_loop())
+
+    asyncio.run_coroutine_threadsafe(init_betdata_finish_consumer('betdata_finish_consumer'), loop=asyncio.get_running_loop())
 
 
 def close_consumers():

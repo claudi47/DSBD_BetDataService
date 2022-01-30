@@ -1,64 +1,32 @@
 from fastapi import FastAPI
+from prometheus_fastapi_instrumentator import Instrumentator
 
+import app.db_utils.mongo_utils as database
 from app.db_utils import advanced_scheduler
-from app.kafka import consumers
+from app.kafka import consumers, producers
+from app.models import SearchDataPartialInDb
 
 app = FastAPI()
 
+Instrumentator().instrument(app).expose(app)
 
 @app.on_event("startup")
-def run_consumers_and_scheduler():
+def run_consumers_producers_and_scheduler():
     advanced_scheduler.init_scheduler()
     consumers.initialize_consumers()
+    producers.initialize_producers()
+
 
 @app.on_event("shutdown")
-def close_consumers():
+def close_consumers_producers():
     consumers.close_consumers()
+    producers.close_producers()
 
-@app.get("/stats")
-# le = 'less equal' - ge = 'greater equal' (between 1 and 4 included)
-async def calculating_stats(stat: int = Query(..., le=4, ge=1)):
-    match stat:
-        case 1:
-            users = await db['web_server_user'].find(projection={'_id': False, 'username': True}).to_list(None)
-            return {'users': users, 'count': len(users)}
-        case 2:
-            return await db['web_server_search'].count_documents({})
-        case 3:
-            researches_gb = await db['web_server_search'].count_documents({'web_site': 'goldbet'})
-            researches_bw = await db['web_server_search'].count_documents({'web_site': 'bwin'})
-            return {'goldbet': researches_gb, 'bwin': researches_bw}
-        case 4:
-            researches_count = await db['web_server_search'].count_documents({})
-            users_count = await db['web_server_user'].count_documents({})
-            if users_count == 0:
-                return 'empty'
-            users = await db['web_server_user'].aggregate([
-                {
-                    '$lookup': {
-                        'from': 'web_server_search',
-                        'localField': 'user_identifier',
-                        'foreignField': 'user_id',
-                        'as': 'search'
-                    }
-                },
-                {
-                    '$project': {
-                        '_id': False,
-                        'username': True,
-                        'count': {'$size': '$search'}
-                    }
-                }
-            ]).to_list(None)
-
-            return {'average': researches_count / users_count, 'users': users}
+@app.get("/searches/")
+async def search_list():
+    researches_gb = await database.mongo.db[SearchDataPartialInDb.collection_name].count_documents(
+        {'web_site': 'goldbet'})
+    researches_bw = await database.mongo.db[SearchDataPartialInDb.collection_name].count_documents({'web_site': 'bwin'})
+    return {'goldbet': researches_gb, 'bwin': researches_bw, 'total': researches_gb + researches_bw}
 
 
-@app.get("/")
-async def root():
-    return {"message": "Hello World"}
-
-
-@app.get("/hello/{name}")
-async def say_hello(name: str):
-    return {"message": f"Hello {name}"}

@@ -6,3 +6,4 @@ pydantic[dotenv]
 uvicorn[standard]
 motor
 pymongo[srv]
+prometheus-fastapi-instrumentator

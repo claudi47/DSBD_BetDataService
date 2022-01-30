@@ -3,13 +3,15 @@ import traceback
 import datetime
 import functools
 import pytz
+from apscheduler.jobstores.memory import MemoryJobStore
 from apscheduler.jobstores.mongodb import MongoDBJobStore
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 import app.settings as config
 
 job_stores = {
-    'default': MongoDBJobStore(config.db_settings.db_database, host=config.db_settings.db_host)
+    'default': MongoDBJobStore(config.db_settings.db_database, host=config.db_settings.db_host),
+    'alternative': MemoryJobStore()
 }
 
 transaction_scheduler: AsyncIOScheduler
@@ -24,7 +26,8 @@ def init_scheduler():
     for job in pending_jobs:
         job.reschedule(trigger='date', run_date=datetime.datetime.now(pytz.utc) + datetime.timedelta(seconds=20))
 
-def async_repeat_deco(repeat_count, reschedule_count=0, inter_repeat_time=5, always_reschedule=False):
+
+def async_repeat_deco(repeat_count, reschedule_count=0, inter_repeat_time=5, always_reschedule=False, store='default'):
     def deco_wrapper(func):
         # this notation is copying the information (name, docstring, ecc.) of the original function to the
         # function wrapper
@@ -50,7 +53,8 @@ def async_repeat_deco(repeat_count, reschedule_count=0, inter_repeat_time=5, alw
                                               run_date=datetime.datetime.now(pytz.utc) + datetime.timedelta(
                                                   seconds=inter_repeat_time),
                                               args=[trans_id, *args], kwargs=kwargs, replace_existing=True,
-                                              misfire_grace_time=None)
+                                              misfire_grace_time=None,
+                                              jobstore=store)
 
             raise Exception(f'Failed execution in function: {func.__name__!r}')
 
@@ -60,7 +64,7 @@ def async_repeat_deco(repeat_count, reschedule_count=0, inter_repeat_time=5, alw
     return deco_wrapper
 
 
-def repeat_deco(repeat_count, reschedule_count=0, inter_repeat_time=5, always_reschedule=False):
+def repeat_deco(repeat_count, reschedule_count=0, inter_repeat_time=5, always_reschedule=False, store='default'):
     def deco_wrapper(func):
         # this notation is copying the information (name, docstring, ecc.) of the original function to the
         # function wrapper
@@ -87,7 +91,8 @@ def repeat_deco(repeat_count, reschedule_count=0, inter_repeat_time=5, always_re
                                               run_date=datetime.datetime.now(pytz.utc) + datetime.timedelta(
                                                   seconds=inter_repeat_time),
                                               args=[trans_id, *args], kwargs=kwargs, replace_existing=True,
-                                              misfire_grace_time=None)
+                                              misfire_grace_time=None,
+                                              jobstore=store)
 
             raise Exception(f'Failed execution in function: {func.__name__!r}')
 
