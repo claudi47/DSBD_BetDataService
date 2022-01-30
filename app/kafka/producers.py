@@ -68,7 +68,7 @@ class GenericProducer(ABC):
 
 
 class CsvMessageProducer(GenericProducer):
-    topic = 'csv_attachment'
+    topic = 'csv-attachment'
 
     def model_to_dict(self, obj, ctx):
         return None
