@@ -98,7 +98,7 @@ csv_message_producer: CsvMessageProducer
 
 
 def initialize_producers(client=None):
-    @async_repeat_deco(3, 3, always_reschedule=True)
+    @async_repeat_deco(3, 3, always_reschedule=True, store='alternative')
     async def init_csv_message_producer(_):
         global csv_message_producer
         csv_message_producer = CsvMessageProducer(asyncio.get_running_loop(), normal=True)
