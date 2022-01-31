@@ -1,8 +1,9 @@
-Django
-djangorestframework
-requests
 apscheduler
-pymongo[srv]<4.0.0
 pytz
-djongo
-confluent-kafka
+confluent-kafka[json,schema-registry,doc]
+fastapi
+pydantic[dotenv]
+uvicorn[standard]
+motor
+pymongo[srv]
+prometheus-fastapi-instrumentator
