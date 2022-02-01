@@ -124,3 +124,7 @@ class User(BaseModel):
 class UserAuthTransfer(BaseModel):
     username: str
     user_id: str
+
+
+class UserAuthTransferReply(UserAuthTransfer):
+    authorized: bool

@@ -1,11 +1,10 @@
 import asyncio
 import datetime
 import logging
+import pytz
 import threading
 import traceback
 from abc import ABC, abstractmethod
-
-import pytz
 from confluent_kafka import DeserializingConsumer, Consumer
 from confluent_kafka.schema_registry.json_schema import JSONDeserializer
 from confluent_kafka.serialization import StringDeserializer
@@ -15,7 +14,7 @@ import app.db_utils.mongo_utils as database
 import app.settings as config
 from app.db_utils.advanced_scheduler import async_repeat_deco
 from app.kafka import producers
-from app.models import SearchDataPartialInDb, BetDataListUpdateInDb, PyObjectId
+from app.models import SearchDataPartialInDb, BetDataListUpdateInDb, PyObjectId, UserAuthTransfer, SearchDataInDb
 
 
 class GenericConsumer(ABC):
@@ -154,6 +153,7 @@ class PartialSearchEntryConsumer(GenericConsumer):
         await database.mongo.db[BetDataListUpdateInDb.collection_name].delete_many({'search_id': id})
         try:
             del search_betdata_sync[tx_id]
+            del bet_data_update_sync[tx_id]
         except:
             pass
 
@@ -403,7 +403,8 @@ class BetDataFinishConsumer(GenericConsumer):
                     existing_search_doc = await database.mongo.db[SearchDataPartialInDb.collection_name].find_one(
                         {'tx_id': msg.key().decode('utf-8')})
                     if existing_search_doc is None or existing_search_doc.get('state') != 'updated':
-                        deleted_tx = await database.mongo.db['deleted_transactions'].find_one({'tx_id': msg.key().decode('utf-8')})
+                        deleted_tx = await database.mongo.db['deleted_transactions'].find_one(
+                            {'tx_id': msg.key().decode('utf-8')})
                         if deleted_tx is not None:
                             raise Exception('Transactions has been deleted!')
                         if bet_data_update_sync.get(msg.key().decode('utf-8')) is None:
@@ -415,7 +416,8 @@ class BetDataFinishConsumer(GenericConsumer):
                         {'tx_id': msg.key().decode('utf-8')},
                         {'$set': {'csv_url': msg.value().decode('utf-8')}})
                     scheduling.transaction_scheduler.remove_job(msg.key().decode('utf-8'))
-                    await asyncio.wait_for(producers.csv_message_producer.produce(msg.key(), msg.value(), msg.headers()), 20)
+                    await asyncio.wait_for(
+                        producers.csv_message_producer.produce(msg.key(), msg.value(), msg.headers()), 20)
 
                 asyncio.run_coroutine_threadsafe(complete_transaction(), loop=self._loop).result(20)
 
@@ -442,9 +444,207 @@ class BetDataFinishConsumer(GenericConsumer):
         self._consumer.close()
 
 
+user_limit_inmemory_lock = threading.Lock()
+user_limit_inmemory_cache = {}
+
+
+class UserLimitAuthConsumer(GenericConsumer):
+
+    @property
+    def group_id(self):
+        return 'my_group_betdata'
+
+    @property
+    def auto_offset_reset(self):
+        return 'earliest'
+
+    @property
+    def auto_commit(self):
+        return False
+
+    @property
+    def topic(self):
+        return 'user-limit-auth'
+
+    @property
+    def schema(self):
+        return """{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "User Auth Request",
+  "description": "User Auth request data",
+  "type": "object",
+  "properties": {
+    "user_id": {
+      "description": "User's Discord id",
+      "type": "string"
+    },
+    "username": {
+      "description": "User's nick",
+      "type": "string"
+    }
+  },
+  "required": [
+    "user_id",
+    "username"
+  ]
+}"""
+
+    def dict_to_model(self, map, ctx):
+        if map is None:
+            return None
+
+        return UserAuthTransfer.parse_obj(map)
+
+    def _consume_data(self):
+        while not self._cancelled:
+            try:
+                msg = self._consumer.poll(0.1)
+                if msg is None:
+                    continue
+
+                user_auth: UserAuthTransfer = msg.value()
+                if user_auth is not None:
+                    async def user_search_count():
+                        count = await database.mongo.db[SearchDataInDb.collection_name].count_documents(
+                            {'user_id': user_auth.user_id})
+                        await database.mongo.db['user_search_count_view'].delete_many({'user_id': user_auth.user_id})
+                        await database.mongo.db['user_search_count_view'].insert_one({'user_id': user_auth.user_id, 'count': count})
+                        return count
+
+                    existing_user_searches = asyncio.run_coroutine_threadsafe(user_search_count(),
+                                                                              loop=self._loop).result(20)
+                    if user_limit_inmemory_cache.get(msg.key()) is None:
+                        with user_limit_inmemory_lock:
+                            if user_limit_inmemory_cache.get(msg.key()) is None:
+                                user_limit_inmemory_cache[msg.key()] = self._loop.create_future()
+
+                    self._loop.call_soon_threadsafe(user_limit_inmemory_cache[msg.key()].set_result,
+                                                    existing_user_searches)
+                    self._consumer.commit(msg)
+                else:
+                    logging.warning(f'Null value for the message: {msg.key()}')
+                    self._consumer.commit(msg)
+            except Exception as exc:
+                logging.exception('')
+                try:
+                    scheduling.transaction_scheduler.reschedule_job(job_id=msg.key(), trigger='date')
+                    self._consumer.commit(msg)
+                except:
+                    try:
+                        self._consumer.commit(msg)
+                        search_betdata_sync[msg.key()].cancel()
+                        del search_betdata_sync[msg.key()]
+                    except:
+                        pass
+
+                # break
+
+        self._consumer.close()
+
+
+class UserLimitAuthRetrieveConsumer(GenericConsumer):
+
+    @property
+    def group_id(self):
+        return 'my_group_betdata'
+
+    @property
+    def auto_offset_reset(self):
+        return 'earliest'
+
+    @property
+    def auto_commit(self):
+        return False
+
+    @property
+    def topic(self):
+        return 'user-limit-auth-retrieve'
+
+    @property
+    def schema(self):
+        return """{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "User Auth Request",
+  "description": "User Auth request data",
+  "type": "object",
+  "properties": {
+    "user_id": {
+      "description": "User's Discord id",
+      "type": "string"
+    },
+    "username": {
+      "description": "User's nick",
+      "type": "string"
+    }
+  },
+  "required": [
+    "user_id",
+    "username"
+  ]
+}"""
+
+    def dict_to_model(self, map, ctx):
+        if map is None:
+            return None
+
+        return UserAuthTransfer.parse_obj(map)
+
+    def _consume_data(self):
+        while not self._cancelled:
+            try:
+                msg = self._consumer.poll(0.1)
+                if msg is None:
+                    continue
+
+                user_auth_transfer: UserAuthTransfer = msg.value()
+                if user_auth_transfer is not None:
+                    async def send_user_limit_resp():
+                        search_count_model = await database.mongo.db['user_search_count_view'].find_one({'user_id': user_auth_transfer.user_id})
+                        if search_count_model is not None:
+                            search_count = search_count_model.get('count')
+                        if search_count_model is None:
+                            if user_limit_inmemory_cache.get(msg.key()) is None:
+                                with user_limit_inmemory_lock:
+                                    if user_limit_inmemory_cache.get(msg.key()) is None:
+                                        user_limit_inmemory_cache[msg.key()] = self._loop.create_future()
+                            search_count = await user_limit_inmemory_cache[msg.key()]
+
+                        try:
+                            del user_limit_inmemory_cache[msg.key()]
+                        except:
+                            pass
+
+                        producers.user_limit_auth_reply_producer.produce(msg.key(), str(search_count), msg.headers())
+
+                    asyncio.run_coroutine_threadsafe(send_user_limit_resp(), loop=self._loop).result(10)
+
+                    self._consumer.commit(msg)
+                else:
+                    logging.warning(f'Null value for the message: {msg.key()}')
+                    self._consumer.commit(msg)
+            except Exception as exc:
+                logging.exception('')
+                try:
+                    scheduling.transaction_scheduler.reschedule_job(job_id=msg.key(), trigger='date')
+                    self._consumer.commit(msg)
+                except:
+                    try:
+                        self._consumer.commit(msg)
+                        search_betdata_sync[msg.key()].cancel()
+                        del search_betdata_sync[msg.key()]
+                    except:
+                        pass
+
+                # break
+
+        self._consumer.close()
+
+
 search_entry_consumer: PartialSearchEntryConsumer
 betdata_apply_consumer: BetDataApplyConsumer
 betdata_finish_consumer: BetDataFinishConsumer
+user_limit_auth_consumer: UserLimitAuthConsumer
+user_limit_auth_retrieve_consumer: UserLimitAuthRetrieveConsumer
 
 
 def initialize_consumers():
@@ -466,13 +666,34 @@ def initialize_consumers():
         betdata_finish_consumer = BetDataFinishConsumer(loop=asyncio.get_running_loop(), normal=True)
         betdata_finish_consumer.consume_data()
 
-    asyncio.run_coroutine_threadsafe(init_partial_search_entry_consumer('partial_search_entry_consumer'), loop=asyncio.get_running_loop())
-    asyncio.run_coroutine_threadsafe(init_betdata_apply_consumer('betdata_apply_consumer'), loop=asyncio.get_running_loop())
+    @async_repeat_deco(3, 3, always_reschedule=True, store='alternative')
+    async def init_user_limit_auth_consumer(_):
+        global user_limit_auth_consumer
+        user_limit_auth_consumer = UserLimitAuthConsumer(loop=asyncio.get_running_loop())
+        user_limit_auth_consumer.consume_data()
 
-    asyncio.run_coroutine_threadsafe(init_betdata_finish_consumer('betdata_finish_consumer'), loop=asyncio.get_running_loop())
+    @async_repeat_deco(3, 3, always_reschedule=True, store='alternative')
+    async def init_user_limit_auth_retrieve_consumer(_):
+        global user_limit_auth_retrieve_consumer
+        user_limit_auth_retrieve_consumer = UserLimitAuthRetrieveConsumer(loop=asyncio.get_running_loop())
+        user_limit_auth_retrieve_consumer.consume_data()
+
+    asyncio.run_coroutine_threadsafe(init_partial_search_entry_consumer('partial_search_entry_consumer'),
+                                     loop=asyncio.get_running_loop())
+    asyncio.run_coroutine_threadsafe(init_betdata_apply_consumer('betdata_apply_consumer'),
+                                     loop=asyncio.get_running_loop())
+
+    asyncio.run_coroutine_threadsafe(init_betdata_finish_consumer('betdata_finish_consumer'),
+                                     loop=asyncio.get_running_loop())
+    asyncio.run_coroutine_threadsafe(init_user_limit_auth_consumer('user_limit_auth_consumer'),
+                                     loop=asyncio.get_running_loop())
+
+    asyncio.run_coroutine_threadsafe(init_user_limit_auth_retrieve_consumer('user_limit_auth_retrieve_consumer'), loop=asyncio.get_running_loop())
 
 
 def close_consumers():
     search_entry_consumer.close()
     betdata_apply_consumer.close()
     betdata_finish_consumer.close()
+    user_limit_auth_consumer.close()
+    user_limit_auth_retrieve_consumer.close()

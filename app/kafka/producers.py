@@ -8,6 +8,7 @@ from confluent_kafka.schema_registry.json_schema import JSONSerializer
 from confluent_kafka.serialization import StringSerializer
 import app.settings as config
 from app.db_utils.advanced_scheduler import async_repeat_deco
+from app.models import UserAuthTransferReply
 
 
 class GenericProducer(ABC):
@@ -94,7 +95,35 @@ class CsvMessageProducer(GenericProducer):
         return result_fut
 
 
+class UserLimitAuthReplyProducer(GenericProducer):
+    topic = 'user-limit-auth-reply'
+
+    def model_to_dict(self, obj: UserAuthTransferReply, ctx):
+        return None
+
+    @property
+    def schema(self):
+        return None
+
+    def produce(self, id, value, headers) -> asyncio.Future:
+        result_fut = self._loop.create_future()
+
+        def delivery_report(err, msg):
+            """ Called once for each message produced to indicate delivery result.
+                Triggered by poll() or flush(). """
+            if err is not None:
+                print('Message delivery failed: {}'.format(err))
+                self._loop.call_soon_threadsafe(result_fut.set_exception, KafkaException(err))
+            else:
+                print('Message delivered to {} [{}]'.format(msg.topic(), msg.partition()))
+                self._loop.call_soon_threadsafe(result_fut.set_result, msg)
+
+        self._producer.produce(topic=self.topic, key=id, value=value, on_delivery=delivery_report, headers=headers)
+        return result_fut
+
+
 csv_message_producer: CsvMessageProducer
+user_limit_auth_reply_producer: UserLimitAuthReplyProducer
 
 
 def initialize_producers(client=None):
@@ -104,7 +133,16 @@ def initialize_producers(client=None):
         csv_message_producer = CsvMessageProducer(asyncio.get_running_loop(), normal=True)
         csv_message_producer.produce_data()
 
+    @async_repeat_deco(3, 3, always_reschedule=True, store='alternative')
+    async def init_user_limit_auth_reply_producer(_):
+        global user_limit_auth_reply_producer
+        user_limit_auth_reply_producer = UserLimitAuthReplyProducer(asyncio.get_running_loop(), normal=True)
+        user_limit_auth_reply_producer.produce_data()
+
     asyncio.run_coroutine_threadsafe(init_csv_message_producer('csv_message_producer'), loop=asyncio.get_running_loop())
+    asyncio.run_coroutine_threadsafe(init_user_limit_auth_reply_producer('user_limit_auth_reply_producer'), loop=asyncio.get_running_loop())
+
 
 def close_producers():
     csv_message_producer.close()
+    user_limit_auth_reply_producer.close()
